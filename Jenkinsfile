@@ -9,22 +9,14 @@ pipeline {
 
     environment {
         REPO_URL = 'https://github.com/cmmani/java_simple.git'
-        BRANCH = 'main'
-
         TARGET_HOST = '192.168.1.117'
-        TARGET_USER = 'developer'
-
         WAR_NAME = 'java-sample-app-1.0.0.war'
-        REMOTE_TMP = '/tmp/java-sample-app-1.0.0.war'
-        DEPLOY_DIR = '/opt/tomcat/webapps'
-        TARGET_WAR = '/opt/tomcat/webapps/java-sample-app-1.0.0.war'
     }
 
     stages {
         stage('Checkout') {
             steps {
-                git branch: "${BRANCH}",
-                    url: "${REPO_URL}"
+                checkout scm
             }
         }
 
@@ -39,53 +31,60 @@ pipeline {
             }
         }
 
-        stage('Upload WAR') {
+        stage('Upload and Deploy') {
             steps {
-                sshagent(credentials: ['target-developer-ssh']) {
-                    sh '''
-                        set -eu
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'target-developer-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    script {
+                        def remote = [
+                            name: 'tomcat-target',
+                            host: env.TARGET_HOST,
+                            user: SSH_USER,
+                            identityFile: SSH_KEY,
+                            allowAnyHosts: true
+                        ]
 
-                        ssh -o BatchMode=yes \
-                            "${TARGET_USER}@${TARGET_HOST}" \
-                            "test -d /opt/tomcat/webapps"
+                        sshPut remote: remote,
+                            from: env.WAR_NAME,
+                            into: '/tmp'
 
-                        scp -o BatchMode=yes \
-                            "$WAR_NAME" \
-                            "${TARGET_USER}@${TARGET_HOST}:${REMOTE_TMP}"
+                        sshCommand remote: remote,
+                            command: '''
+                                set -eu
 
-                        echo "WAR uploaded successfully"
-                    '''
-                }
-            }
-        }
+                                SRC=/tmp/java-sample-app-1.0.0.war
+                                DST=/opt/tomcat/webapps/java-sample-app-1.0.0.war
+                                BACKUP=/opt/tomcat/war-backups
 
-        stage('Backup and Deploy') {
-            steps {
-                sshagent(credentials: ['target-developer-ssh']) {
-                    sh '''
-                        set -eu
+                                sudo -n /bin/bash -c '
+                                    set -eu
 
-                        ssh -o BatchMode=yes \
-                            "${TARGET_USER}@${TARGET_HOST}" \
-                            "sudo -n /bin/bash -c 'set -eu
-                            SRC=/tmp/java-sample-app-1.0.0.war
-                            DST=/opt/tomcat/webapps/java-sample-app-1.0.0.war
-                            BACKUP=/opt/tomcat/war-backups
+                                    test -s /tmp/java-sample-app-1.0.0.war
+                                    /usr/bin/jar tf /tmp/java-sample-app-1.0.0.war >/dev/null
 
-                            test -s \\"\\$SRC\\"
-                            /usr/bin/jar tf \\"\\$SRC\\" >/dev/null
-                            mkdir -p \\"\\$BACKUP\\"
+                                    mkdir -p /opt/tomcat/war-backups
 
-                            if [ -f \\"\\$DST\\" ]; then
-                                cp -p \\"\\$DST\\" \\"\\$BACKUP/java-sample-app-1.0.0-\\$(date +%Y%m%d-%H%M%S).war\\"
-                            fi
+                                    if [ -f /opt/tomcat/webapps/java-sample-app-1.0.0.war ]; then
+                                        cp -p /opt/tomcat/webapps/java-sample-app-1.0.0.war \
+                                        "/opt/tomcat/war-backups/java-sample-app-1.0.0-$(date +%Y%m%d-%H%M%S).war"
+                                    fi
 
-                            install -o root -g root -m 0644 \\"\\$SRC\\" \\"\\$DST.new\\"
-                            mv -f \\"\\$DST.new\\" \\"\\$DST\\"
+                                    install -o root -g root -m 0644 \
+                                    /tmp/java-sample-app-1.0.0.war \
+                                    /opt/tomcat/webapps/java-sample-app-1.0.0.war.new
 
-                            echo Deployment successful
-                            '"
-                    '''
+                                    mv -f /opt/tomcat/webapps/java-sample-app-1.0.0.war.new \
+                                    /opt/tomcat/webapps/java-sample-app-1.0.0.war
+
+                                    echo "WAR deployment successful"
+                                '
+                            '''
+                    }
                 }
             }
         }
@@ -93,10 +92,10 @@ pipeline {
 
     post {
         success {
-            echo 'SUCCESS: WAR deployed to 192.168.1.117.'
+            echo 'SUCCESS: WAR uploaded and deployment command completed.'
         }
         failure {
-            echo 'FAILED: Check the Jenkins Console Output.'
+            echo 'FAILED: Check Console Output for the exact error.'
         }
     }
 }
